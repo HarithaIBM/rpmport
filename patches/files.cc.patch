@@ -1,0 +1,652 @@
+diff --git a/build/files.cc b/build/files.cc
+index fba2aff..ae89acb 100644
+--- a/build/files.cc
++++ b/build/files.cc
+@@ -11,7 +11,7 @@
+ #include <algorithm>
+ 
+ #define	MYALLPERMS	07777
+-
++# include <arpa/inet.h>
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <regex.h>
+@@ -24,7 +24,7 @@
+ #include <libelf.h>
+ #include <elfutils/libdwelf.h>
+ #endif
+-
++#define ZOS_MODE_MASK  07777 | S_IFMT
+ #include <rpm/argv.h>
+ #include <rpm/rpmfc.h>
+ #include <rpm/rpmfileutil.h>	/* rpmDoDigest() */
+@@ -1012,310 +1012,221 @@ static int seenHardLink(FileRecords & files, FileListRec flp, rpm_ino_t *fileid)
+  */
+ static void genCpioListAndHeader(FileList fl, rpmSpec spec, Package pkg, int isSrc)
+ {
++    printf("dh genCpioListAndHeader enter\n");
+     FileListRec flp;
+     char buf[BUFSIZ];
+     int i, npaths = 0;
+     int fail_on_dupes = rpmExpandNumeric("%{?_duplicate_files_terminate_build}") > 0;
+     uint32_t defaultalgo = RPM_HASH_SHA256, digestalgo;
+     rpm_loff_t totalFileSize = 0;
+-    Header h = pkg->header; /* just a shortcut */
++    Header h = pkg->header;
+     int override_date = 0;
+     time_t mtime_clamp = 0;
+     char *srcdate = getenv("SOURCE_DATE_EPOCH");
+     char *mtime_policy_str = rpmExpand("%{?build_mtime_policy}", NULL);
+ 
+-    /* backward compatibility */
+     if (!*mtime_policy_str) {
+-        if (srcdate && rpmExpandNumeric("%{?clamp_mtime_to_source_date_epoch}")) {
+-	    free(mtime_policy_str);
+-	    mtime_policy_str = xstrdup("clamp_to_source_date_epoch");
+-	    rpmlog(RPMLOG_WARNING,
+-		    _("%%clamp_mtime_to_source_date_epoch is deprecated, please use %%build_mtime_policy\n"));
+-	}
+-    }
++            if (srcdate && rpmExpandNumeric("%{?clamp_mtime_to_source_date_epoch}")) {
++	                free(mtime_policy_str);
++	                mtime_policy_str = xstrdup("clamp_to_source_date_epoch");
++	                rpmlog(RPMLOG_WARNING, _("%%clamp_mtime_to_source_date_epoch is deprecated, please use %%build_mtime_policy\n"));
++	            }
++        }
+ 
+     if (!strcmp(mtime_policy_str, "clamp_to_buildtime")) {
+-	mtime_clamp = spec->buildTime;
+-	override_date = 1;
+-    } else if (!strcmp(mtime_policy_str, "clamp_to_source_date_epoch")) {
+-	/* Limit the maximum date to SOURCE_DATE_EPOCH if defined
+-	 * similar to the tar --clamp-mtime option
+-	 * https://reproducible-builds.org/specs/source-date-epoch/
+-	 */
+-	if (srcdate) {
+-	    char *endptr;
+-	    errno = 0;
+-	    mtime_clamp = strtol(srcdate, &endptr, 10);
+-	    if (srcdate == endptr || *endptr || errno != 0) {
+-		rpmlog(RPMLOG_ERR, _("unable to parse %s=%s\n"), "SOURCE_DATE_EPOCH", srcdate);
+-		fl->processingFailed = 1;
+-	    }
+-	    override_date = 1;
+-	}
+-    } else if (*mtime_policy_str) {
+-	rpmlog(RPMLOG_WARNING,
+-		_("Unknown mtime policy '%s'\n"), mtime_policy_str);
+-    }
++            mtime_clamp = spec->buildTime;
++            override_date = 1;
++        } else if (!strcmp(mtime_policy_str, "clamp_to_source_date_epoch")) {
++	        if (srcdate) {
++		            char *endptr;
++		            errno = 0;
++		            mtime_clamp = strtol(srcdate, &endptr, 10);
++		            if (srcdate == endptr || *endptr || errno != 0) {
++			                    rpmlog(RPMLOG_ERR, _("unable to parse %s=%s\n"), "SOURCE_DATE_EPOCH", srcdate);
++			                    fl->processingFailed = 1;
++			                }
++		            override_date = 1;
++		        }
++	    } else if (*mtime_policy_str) {
++	            rpmlog(RPMLOG_WARNING, _("Unknown mtime policy '%s'\n"), mtime_policy_str);
++	        }
+     free(mtime_policy_str);
+ 
+-    /*
+-     * See if non-default file digest algorithm is requested. If not
+-     * specified, quietly assume default. Otherwise check if supported type.
+-     */
+-    digestalgo = rpmExpandNumeric(isSrc ? "%{_source_filedigest_algorithm}" :
+-					  "%{_binary_filedigest_algorithm}");
+-    if (digestalgo == 0) {
+-	digestalgo = defaultalgo;
+-    }
+-
++    digestalgo = rpmExpandNumeric(isSrc ? "%{_source_filedigest_algorithm}" : "%{_binary_filedigest_algorithm}");
++    if (digestalgo == 0) digestalgo = defaultalgo;
+     if (rpmDigestLength(digestalgo) == 0) {
+-	rpmlog(RPMLOG_WARNING,
+-		_("Unknown file digest algorithm %u, falling back to %u\n"),
+-		digestalgo, defaultalgo);
+-	digestalgo = defaultalgo;
+-    }
++            rpmlog(RPMLOG_WARNING, _("Unknown file digest algorithm %u, falling back to %u\n"), digestalgo, defaultalgo);
++            digestalgo = defaultalgo;
++        }
+ 
+-    /* Adjust paths if needed */
+     if (!isSrc && pkg->removePostfixes) {
+-	for (auto const & fl : fl->files) {
+-	    char * cpiopath = fl.cpioPath;
+-	    char * cpiopath_orig = xstrdup(cpiopath);
+-
+-	    for (ARGV_const_t postfix_p = pkg->removePostfixes; *postfix_p; postfix_p++) {
+-		int len = strlen(*postfix_p);
+-		int plen = strlen(cpiopath);
+-		if (len <= plen && !strncmp(cpiopath+plen-len, *postfix_p, len)) {
+-		    cpiopath[plen-len] = '\0';
+-		    if (plen-len > 0 && cpiopath[plen-len-1] == '/') {
+-			cpiopath[plen-len-1] = '\0';
+-		    }
+-		}
+-	    }
+-	    if (strcmp(cpiopath_orig, cpiopath))
+-		pkg->fileRenameMap.insert({cpiopath, cpiopath_orig});
+-	    _free(cpiopath_orig);
+-	}
+-    }
++            for (auto const & fl : fl->files) {
++	                char * cpiopath = fl.cpioPath;
++	                char * cpiopath_orig = xstrdup(cpiopath);
++	                for (ARGV_const_t postfix_p = pkg->removePostfixes; *postfix_p; postfix_p++) {
++			                int len = strlen(*postfix_p);
++			                int plen = strlen(cpiopath);
++			                if (len <= plen && !strncmp(cpiopath+plen-len, *postfix_p, len)) {
++					                    cpiopath[plen-len] = '\0';
++					                    if (plen-len > 0 && cpiopath[plen-len-1] == '/') {
++							                            cpiopath[plen-len-1] = '\0';
++							                        }
++					                }
++			            }
++	                if (strcmp(cpiopath_orig, cpiopath))
++	                    pkg->fileRenameMap.insert({cpiopath, cpiopath_orig});
++	                _free(cpiopath_orig);
++	            }
++        }
+ 
+-    /* Sort the big list */
+     std::sort(fl->files.begin(), fl->files.end());
+-    
+     pkg->dpaths = (char **)xmalloc((fl->files.size() + 1) * sizeof(*pkg->dpaths));
+ 
+-    /* Generate the header. */
+-    for (i = 0, flp = fl->files.data(); i < fl->files.size(); i++, flp++) {
+-	rpm_ino_t fileid = flp - fl->files.data();
+-
+- 	/* Merge duplicate entries. */
+-	while (i < (fl->files.size() - 1) &&
+-	    rstreq(flp->cpioPath, flp[1].cpioPath)) {
+-
+-	    /* Two entries for the same file found, merge the entries. */
+-	    /* Note that an %exclude is a duplication of a file reference */
+-
+-	    /* file flags */
+-	    flp[1].flags |= flp->flags;	
+-
+-	    if (!(flp[1].flags & RPMFILE_EXCLUDE)) {
+-		int lvl = RPMLOG_WARNING;
+-		if (fail_on_dupes) {
+-		    lvl = RPMLOG_ERR;
+-		    fl->processingFailed = 1;
+-		}
+-		rpmlog(lvl, _("File listed twice: %s\n"), flp->cpioPath);
+-	    }
+-   
+-	    /* file mode */
+-	    if (S_ISDIR(flp->fl_mode)) {
+-		if ((flp[1].specdFlags & (SPECD_DIRMODE | SPECD_DEFDIRMODE)) <
+-		    (flp->specdFlags & (SPECD_DIRMODE | SPECD_DEFDIRMODE)))
+-			flp[1].fl_mode = flp->fl_mode;
+-	    } else {
+-		if ((flp[1].specdFlags & (SPECD_FILEMODE | SPECD_DEFFILEMODE)) <
+-		    (flp->specdFlags & (SPECD_FILEMODE | SPECD_DEFFILEMODE)))
+-			flp[1].fl_mode = flp->fl_mode;
+-	    }
+-
+-	    /* uid */
+-	    if ((flp[1].specdFlags & (SPECD_UID | SPECD_DEFUID)) <
+-		(flp->specdFlags & (SPECD_UID | SPECD_DEFUID)))
+-	    {
+-		flp[1].uname = flp->uname;
+-	    }
+-
+-	    /* gid */
+-	    if ((flp[1].specdFlags & (SPECD_GID | SPECD_DEFGID)) <
+-		(flp->specdFlags & (SPECD_GID | SPECD_DEFGID)))
+-	    {
+-		flp[1].gname = flp->gname;
+-	    }
+-
+-	    /* verify flags */
+-	    if ((flp[1].specdFlags & (SPECD_VERIFY | SPECD_DEFVERIFY)) <
+-		(flp->specdFlags & (SPECD_VERIFY | SPECD_DEFVERIFY)))
+-		    flp[1].verifyFlags = flp->verifyFlags;
+-
+-	    /* XXX to-do: language */
+-
+-	    flp++; i++;
+-	}
+-
+-	/* Skip files that were marked with %exclude. */
+-	if (flp->flags & RPMFILE_EXCLUDE)
+-	{
+-	    argvAdd(&pkg->fileExcludeList, flp->cpioPath);
+-	    continue;
+-	}
+-
+-	/* Collect on-disk paths for archive creation */
+-	pkg->dpaths[npaths++] = xstrdup(flp->diskPath);
+-
+-	headerPutString(h, RPMTAG_OLDFILENAMES, flp->cpioPath);
+-	headerPutString(h, RPMTAG_FILEUSERNAME,
+-			rpmstrPoolStr(fl->pool, flp->uname));
+-	headerPutString(h, RPMTAG_FILEGROUPNAME,
+-			rpmstrPoolStr(fl->pool, flp->gname));
+-
+-	/* Use 64bit filesizes always on v6, on older only if required. */
+-	if (spec->rpmformat >= 6 || fl->largeFiles) {
+-	    rpm_loff_t rsize64 = (rpm_loff_t)flp->fl_size;
+-	    headerPutUint64(h, RPMTAG_LONGFILESIZES, &rsize64, 1);
+-            (void) rpmlibNeedsFeature(pkg, "LargeFiles", "4.12.0-1");
+-	} else {
+-	    rpm_off_t rsize32 = (rpm_off_t)flp->fl_size;
+-	    headerPutUint32(h, RPMTAG_FILESIZES, &rsize32, 1);
+-	}
+-	/* Excludes and dupes have been filtered out by now. */
+-	if (isLinkable(flp->fl_mode)) {
+-	    if (flp->fl_nlink == 1 || !seenHardLink(fl->files, flp, &fileid)) {
+-		totalFileSize += flp->fl_size;
+-	    }
+-	}
+-	
+-	if (override_date && flp->fl_mtime > mtime_clamp) {
+-	    flp->fl_mtime = mtime_clamp;
+-	}
+-	/*
+- 	 * For items whose size varies between systems, always explicitly 
+- 	 * cast to the header type before inserting.
+- 	 * TODO: check and warn if header type overflows for each case.
+- 	 */
+-	{   rpm_time_t rtime = (rpm_time_t) flp->fl_mtime;
+-	    headerPutUint32(h, RPMTAG_FILEMTIMES, &rtime, 1);
+-	}
+-
+-	{   rpm_mode_t rmode = (rpm_mode_t) flp->fl_mode;
+-	    headerPutUint16(h, RPMTAG_FILEMODES, &rmode, 1);
+-	}
++    std::vector<uint16_t> allModes;
++    //std::vector<rpm_mode_t> allModes;
+ 
+-	{   rpm_rdev_t rrdev = (rpm_rdev_t) flp->fl_rdev;
+-	    headerPutUint16(h, RPMTAG_FILERDEVS, &rrdev, 1);
+-	}
+-	
+-	/*
+-	 * To allow rpmbuild to work on filesystems with 64bit inodes numbers,
+-	 * remap them into 32bit integers based on filelist index, just
+-	 * preserving semantics for determining hardlinks.
+-	 * Start at 1 as inode zero as that could be considered as an error.
+-	 * Since we flatten all the inodes to appear within a single fs,
+-	 * we also need to flatten the devices.
+-	 */
+-	{   rpm_ino_t rino = fileid + 1;
+-	    rpm_dev_t rdev = flp->fl_dev ? 1 : 0;
+-	    headerPutUint32(h, RPMTAG_FILEINODES, &rino, 1);
+-	    headerPutUint32(h, RPMTAG_FILEDEVICES, &rdev, 1);
+-	}
+-	
+-	headerPutString(h, RPMTAG_FILELANGS, flp->langs);
++    for (i = 0, flp = fl->files.data(); i < fl->files.size(); i++, flp++) {
++            rpm_ino_t fileid = flp - fl->files.data();
++    
++            while (i < (fl->files.size() - 1) && rstreq(flp->cpioPath, flp[1].cpioPath)) {
++	                flp[1].flags |= flp->flags;
++	                if (!(flp[1].flags & RPMFILE_EXCLUDE)) {
++			                int lvl = RPMLOG_WARNING;
++			                if (fail_on_dupes) {
++					                    lvl = RPMLOG_ERR;
++					                    fl->processingFailed = 1;
++					                }
++			                rpmlog(lvl, _("File listed twice: %s\n"), flp->cpioPath);
++			            }
++	                if (S_ISDIR(flp->fl_mode)) {
++			                if ((flp[1].specdFlags & (SPECD_DIRMODE | SPECD_DEFDIRMODE)) < (flp->specdFlags & (SPECD_DIRMODE | SPECD_DEFDIRMODE)))
++			                    flp[1].fl_mode = flp->fl_mode;
++			            } else {
++				                    if ((flp[1].specdFlags & (SPECD_FILEMODE | SPECD_DEFFILEMODE)) < (flp->specdFlags & (SPECD_FILEMODE | SPECD_DEFFILEMODE)))
++				                        flp[1].fl_mode = flp->fl_mode;
++				                }
++	                flp++; i++;
++	            }
++    
++            if (flp->flags & RPMFILE_EXCLUDE) {
++	                argvAdd(&pkg->fileExcludeList, flp->cpioPath);
++	                continue;
++	            }
++    
++            pkg->dpaths[npaths++] = xstrdup(flp->diskPath);
++            headerPutString(h, RPMTAG_OLDFILENAMES, flp->cpioPath);
++            headerPutString(h, RPMTAG_FILEUSERNAME, rpmstrPoolStr(fl->pool, flp->uname));
++            headerPutString(h, RPMTAG_FILEGROUPNAME, rpmstrPoolStr(fl->pool, flp->gname));
++    
++            if (spec->rpmformat >= 6 || fl->largeFiles) {
++	                rpm_loff_t rsize64 = (rpm_loff_t)flp->fl_size;
++	                headerPutUint64(h, RPMTAG_LONGFILESIZES, &rsize64, 1);
++	                (void) rpmlibNeedsFeature(pkg, "LargeFiles", "4.12.0-1");
++	            } else {
++		                rpm_off_t rsize32 = (rpm_off_t)flp->fl_size;
++		                headerPutUint32(h, RPMTAG_FILESIZES, &rsize32, 1);
++		            }
++    
++            allModes.push_back((rpm_mode_t)flp->fl_mode);
++            printf("DEBUG: file %s fl_mode = 0x%08X\n", flp->cpioPath, flp->fl_mode);
++    
++            rpm_time_t rtime = (rpm_time_t) flp->fl_mtime;
++            headerPutUint32(h, RPMTAG_FILEMTIMES, &rtime, 1);
++    
++            rpm_rdev_t rrdev = (rpm_rdev_t) flp->fl_rdev;
++            headerPutUint16(h, RPMTAG_FILERDEVS, &rrdev, 1);
++    
++            rpm_ino_t rino = fileid + 1;
++            rpm_dev_t rdev = flp->fl_dev ? 1 : 0;
++            headerPutUint32(h, RPMTAG_FILEINODES, &rino, 1);
++            headerPutUint32(h, RPMTAG_FILEDEVICES, &rdev, 1);
++    
++            headerPutString(h, RPMTAG_FILELANGS, flp->langs);
++    
++            if (fl->haveCaps)
++                headerPutString(h, RPMTAG_FILECAPS, flp->caps);
++    
++            buf[0] = '\0';
++            if (S_ISREG(flp->fl_mode) && !(flp->flags & RPMFILE_GHOST))
++                (void) rpmDoDigest(digestalgo, flp->diskPath, 1, (unsigned char *)buf);
++            headerPutString(h, RPMTAG_FILEDIGESTS, buf);
++    
++            buf[0] = '\0';
++            if (S_ISLNK(flp->fl_mode)) {
++	                ssize_t llen = readlink(flp->diskPath, buf, BUFSIZ-1);
++	                if (llen >= 0) buf[llen] = '\0';
++	            }
++            headerPutString(h, RPMTAG_FILELINKTOS, buf);
++    
++            headerPutUint32(h, RPMTAG_FILEVERIFYFLAGS, &(flp->verifyFlags),1);
++    
++            if (!isSrc && isDoc(fl->docDirs, flp->cpioPath)) flp->flags |= RPMFILE_DOC;
++            if (S_ISDIR(flp->fl_mode)) flp->flags &= ~(RPMFILE_CONFIG|RPMFILE_DOC|RPMFILE_LICENSE);
++            flp->flags &= PARSEATTR_MASK;
++            headerPutUint32(h, RPMTAG_FILEFLAGS, &(flp->flags),1);
++        }
++    pkg->dpaths[npaths] = NULL;
+ 
+-	if (fl->haveCaps) {
+-	    headerPutString(h, RPMTAG_FILECAPS, flp->caps);
+-	}
+-	
+-	buf[0] = '\0';
+-	if (S_ISREG(flp->fl_mode) && !(flp->flags & RPMFILE_GHOST))
+-	    (void) rpmDoDigest(digestalgo, flp->diskPath, 1, 
+-			       (unsigned char *)buf);
+-	headerPutString(h, RPMTAG_FILEDIGESTS, buf);
+-	
+-	buf[0] = '\0';
+-	if (S_ISLNK(flp->fl_mode)) {
+-	    ssize_t llen = readlink(flp->diskPath, buf, BUFSIZ-1);
+-	    if (llen == -1) {
+-		rpmlog(RPMLOG_ERR, _("reading symlink %s failed: %s\n"),
+-			flp->diskPath, strerror(errno));
+-		fl->processingFailed = 1;
+-	    } else {
+-		buf[llen] = '\0';
+-		if (buf[0] == '/') {
+-		    rpmlog(RPMLOG_WARNING, _("absolute symlink: %s -> %s\n"),
+-			flp->cpioPath, buf);
+-		}
+-		if (buf[0] == '/' && !rstreq(fl->buildRoot, "/") &&
+-			rstreqn(buf, fl->buildRoot, fl->buildRootLen)) {
+-		    rpmlog(RPMLOG_ERR,
+-				_("Symlink points to BuildRoot: %s -> %s\n"),
+-				flp->cpioPath, buf);
+-		    fl->processingFailed = 1;
+-		}
++    if (!allModes.empty()) {
++            headerPutUint16(h, RPMTAG_FILEMODES, allModes.data(), allModes.size());
++            //headerPutUint32(h, RPMTAG_FILEMODES, allModes.data(), allModes.size());
++	    printf("dh putting rpm modes - exit\n");
++            printf("DEBUG: wrote %zu file modes to header\n", allModes.size());
++	    for (size_t i = 0; i < allModes.size(); i++) {
++		        printf("DEBUG: FILEMODES[%zu] = 0x%08X\n", i, allModes[i]);
+ 	    }
+-	}
+-	headerPutString(h, RPMTAG_FILELINKTOS, buf);
+-	
+-	if (flp->flags & RPMFILE_GHOST) {
+-	    flp->verifyFlags &= ~(RPMVERIFY_FILEDIGEST | RPMVERIFY_FILESIZE |
+-				RPMVERIFY_LINKTO | RPMVERIFY_MTIME);
+-	}
+-	headerPutUint32(h, RPMTAG_FILEVERIFYFLAGS, &(flp->verifyFlags),1);
+-	
+-	if (!isSrc && isDoc(fl->docDirs, flp->cpioPath))
+-	    flp->flags |= RPMFILE_DOC;
+-	/* XXX Should directories have %doc/%config attributes? (#14531) */
+-	if (S_ISDIR(flp->fl_mode))
+-	    flp->flags &= ~(RPMFILE_CONFIG|RPMFILE_DOC|RPMFILE_LICENSE);
+-	/* Strip internal parse data */
+-	flp->flags &= PARSEATTR_MASK;
+-
+-	headerPutUint32(h, RPMTAG_FILEFLAGS, &(flp->flags) ,1);
+-    }
+-    pkg->dpaths[npaths] = NULL;
++        }
+ 
+-    /* Use 64bit sizes always on v6, on older only if required. */
+     if (spec->rpmformat < 6 && totalFileSize < UINT32_MAX) {
+-	rpm_off_t totalsize = totalFileSize;
+-	headerPutUint32(h, RPMTAG_SIZE, &totalsize, 1);
+-    } else {
+-	rpm_loff_t totalsize = totalFileSize;
+-	headerPutUint64(h, RPMTAG_LONGSIZE, &totalsize, 1);
+-    }
++            rpm_off_t totalsize = totalFileSize;
++            headerPutUint32(h, RPMTAG_SIZE, &totalsize, 1);
++        } else {
++	        rpm_loff_t totalsize = totalFileSize;
++	        headerPutUint64(h, RPMTAG_LONGSIZE, &totalsize, 1);
++	    }
+ 
+     if (digestalgo != RPM_HASH_MD5) {
+-	headerPutUint32(h, RPMTAG_FILEDIGESTALGO, &digestalgo, 1);
+-	rpmlibNeedsFeature(pkg, "FileDigests", "4.6.0-1");
+-    }
+-
+-    if (fl->haveCaps) {
+-	rpmlibNeedsFeature(pkg, "FileCaps", "4.6.1-1");
+-    }
++            headerPutUint32(h, RPMTAG_FILEDIGESTALGO, &digestalgo, 1);
++            rpmlibNeedsFeature(pkg, "FileDigests", "4.6.0-1");
++        }
+ 
++    if (fl->haveCaps) rpmlibNeedsFeature(pkg, "FileCaps", "4.6.1-1");
+     if (!isSrc && !rpmExpandNumeric("%{_noPayloadPrefix}"))
+-	(void) rpmlibNeedsFeature(pkg, "PayloadFilesHavePrefix", "4.0-1");
++        (void) rpmlibNeedsFeature(pkg, "PayloadFilesHavePrefix", "4.0-1");
+ 
+-    /* rpmfiNew() only groks compressed filelists */
+     headerConvert(h, HEADERCONV_COMPRESSFILELIST);
+     pkg->cpioList = rpmfilesNew(NULL, h, RPMTAG_BASENAMES, 0);
+-
++/*  
++   rpmfiles files = pkg->cpioList;   /* all files in package */
++/*rpm_count_t nfiles = rpmfilesFC(files);  
++   for (rpm_count_t i = 0; i < nfiles; i++) {
++	rpm_mode_t rmode = rpmfilesFMode(files, i);
++	if (rmode == 0) {
++	    rmode = S_IFREG | 0644;   // default if missing
++	}
++
++//       uint32_t m = htonl(rmode);
++	uint16_t m = rmode;
++
++       /* write to header (network byte order) */
++  /*      headerPutUint16(h, RPMTAG_FILEMODES, &m, 1);
++
++	fprintf(stderr,
++	"DEBUG: wrote mode %07o (stored as 0x%08X) for file index %d (%s)\n",
++                rmode, m, i, rpmfilesFN(files, i));
++    // TODO: write 'm' into the header if needed
++ }*/
++							  //
+     if (pkg->cpioList == NULL || rpmfilesFC(pkg->cpioList) != npaths) {
+-	fl->processingFailed = 1;
+-    }
++            fl->processingFailed = 1;
++        }
+ 
+-    if (fl->pkgFlags & RPMBUILD_PKG_NODIRTOKENS) {
+-	/* Uncompress filelist if legacy format requested */
+-	headerConvert(h, HEADERCONV_EXPANDFILELIST);
+-    } else {
+-	/* Binary packages with dirNames cannot be installed by legacy rpm. */
+-	(void) rpmlibNeedsFeature(pkg, "CompressedFileNames", "3.0.4-1");
+-    }
++    if (fl->pkgFlags & RPMBUILD_PKG_NODIRTOKENS)
++        headerConvert(h, HEADERCONV_EXPANDFILELIST);
++    else
++        (void) rpmlibNeedsFeature(pkg, "CompressedFileNames", "3.0.4-1");
++
++    printf("dh genCpioListAndHeader exit\n");
+ }
+ 
+ static void FileRecordsFree(FileRecords & files)
+@@ -1392,6 +1303,7 @@ static int validFilename(const char *fn)
+ static rpmRC addFile(FileList fl, const char * diskPath,
+ 		struct stat * statp)
+ {
++	printf("dh addFile enter\n");
+     size_t plen = strlen(diskPath);
+     char buf[plen + 1];
+     const char *cpioPath;
+@@ -1412,7 +1324,7 @@ static rpmRC addFile(FileList fl, const char * diskPath,
+ 	rpmlog(RPMLOG_ERR, _("Path is outside buildroot: %s\n"), diskPath);
+ 	goto exit;
+     }
+-
++ printf("dh addFile diskPath= %s\n", diskPath);
+     if (!validFilename(diskPath))
+ 	goto exit;
+     
+@@ -1448,6 +1360,9 @@ static rpmRC addFile(FileList fl, const char * diskPath,
+ 	    statp = fakeStat(&(fl->cur), &statbuf);
+ 	} else if (lstat(diskPath, &statbuf) == 0) {
+ 	    statp = &statbuf;
++	/* Debug: print raw mode */
++	        printf("DEBUG: lstat(%s): st_mode = 0x%08x (octal %07o)\n",
++				           diskPath, statbuf.st_mode, statbuf.st_mode);
+ 	} else if (fl->cur.attrFlags & RPMFILE_GHOST) {
+ 	    statp = fakeStat(&(fl->cur), &statbuf);
+ 	} else {
+@@ -1484,7 +1399,10 @@ static rpmRC addFile(FileList fl, const char * diskPath,
+ 	return recurseDir(fl, diskPath);
+     }
+ 
+-    fileMode = statp->st_mode;
++//    fileMode = statp->st_mode & ZOS_MODE_MASK;;
++    fileMode = statp->st_mode & (S_IFMT | 07777);
++printf("Normalized mode = 0x%08x (octal %07o)\n",
++		       fileMode, fileMode);
+ 
+     /* Explicit %attr() always wins */
+     if (fl->cur.ar.ar_fmodestr) {
+@@ -1502,10 +1420,15 @@ static rpmRC addFile(FileList fl, const char * diskPath,
+ 	    if (fl->def.ar.ar_dmodestr) {
+ 		fileMode &= S_IFMT;
+ 		fileMode |= fl->def.ar.ar_dmode;
++		printf("dh dir mode = 0x%08x (octal %07o)\n",
++				                       fileMode, fileMode);
++
+ 	    }
+ 	} else if (!S_ISLNK(fileMode) && fl->def.ar.ar_fmodestr) {
+ 	    fileMode &= S_IFMT;
+ 	    fileMode |= fl->def.ar.ar_fmode;
++	    printf("dh file mode = 0x%08x (octal %07o)\n",
++			                           fileMode, fileMode);
+ 	}
+     }
+     if (fl->cur.ar.ar_user) {
+@@ -1540,6 +1463,7 @@ static rpmRC addFile(FileList fl, const char * diskPath,
+ 	    flp->fl_size = 0;
+ 
+ 	flp->cpioPath = xstrdup(cpioPath);
++	printf("dh cpio path = %s\n", flp->cpioPath);
+ 	flp->diskPath = xstrdup(diskPath);
+ 	flp->uname = rpmstrPoolId(fl->pool, fileUname, 1);
+ 	flp->gname = rpmstrPoolId(fl->pool, fileGname, 1);
+@@ -1573,6 +1497,7 @@ exit:
+     if (rc != RPMRC_OK)
+ 	fl->processingFailed = 1;
+ 
++	printf("dh addFile exit\n");
+     return rc;
+ }
+ 
+@@ -1600,6 +1525,7 @@ static rpmRC recurseDir(FileList fl, const char * diskPath)
+ 	case FTS_SL:		/* symbolic link */
+ 	case FTS_SLNONE:	/* symbolic link without target */
+ 	case FTS_DEFAULT:	/* none of the above */
++		printf("dh addFile called 1\n");
+ 	    rc = addFile(fl, fts->fts_accpath, fts->fts_statp);
+ 	    break;
+ 	case FTS_DOT:		/* dot or dot-dot */
+@@ -1681,7 +1607,10 @@ static rpmRC processMetadataFile(Package pkg, FileList fl,
+     rc = RPMRC_OK;
+ 
+     if (absolute)
++    {
++		printf("dh addFile called 2\n");
+ 	rc = addFile(fl, fn, NULL);
++    }
+ 
+ exit:
+     free(apkt);
+@@ -2189,6 +2118,7 @@ static rpmRC processBinaryFile(Package pkg, FileList fl, const char * fileName,
+ 	doGlob = 0;
+ 
+     if (!doGlob) {
++		printf("dh addFile called 3\n");
+ 	rc = addFile(fl, diskPath.c_str(), NULL);
+ 	goto exit;
+     }
+@@ -2197,7 +2127,10 @@ static rpmRC processBinaryFile(Package pkg, FileList fl, const char * fileName,
+ 	goto exit;
+ 
+     for (i = 0; i < argc; i++)
++    {
++		printf("dh addFile called 4\n");
+ 	rc = addFile(fl, argv[i], NULL);
++    }
+     argvFree(argv);
+ 
+ exit:
+@@ -2397,6 +2330,7 @@ static void processSpecialDir(rpmSpec spec, Package pkg, FileList fl,
+ 
+ 	for (ARGV_const_t fn = files[i]; fn && *fn; fn++) {
+ 	    rasprintf(&newfile, "%s/%s", sd->dirname, basename(*fn));
++	    printf("dh calling processBinaryFile 1\n");
+ 	    processBinaryFile(pkg, fl, newfile, 0);
+ 	    free(newfile);
+ 	}
+@@ -2409,6 +2343,7 @@ static void processSpecialDir(rpmSpec spec, Package pkg, FileList fl,
+     copyFileEntry(&sd->entries[0].defEntry, &fl->def);
+     copyFileEntry(&sd->entries[0].curEntry, &fl->cur);
+     fl->cur.isDir = 1;
++	    printf("dh calling processBinaryFile 2\n");
+     (void) processBinaryFile(pkg, fl, sd->dirname, 1);
+ 
+     freeStringBuf(docScript);
+@@ -2489,6 +2424,7 @@ static void addPackageFileList (struct FileList_s *fl, Package pkg,
+ 		}
+ 		if (fl->cur.attrFlags & RPMFILE_DIR)
+ 		    fl->cur.isDir = 1;
++		printf("dh addFile called 5\n");
+ 		addFile(fl, *fn, NULL);
+ 		continue;
+ 	    }
+@@ -2534,6 +2470,7 @@ static void addPackageFileList (struct FileList_s *fl, Package pkg,
+ 	    } else {
+ 		if (fl->cur.attrFlags & RPMFILE_DIR)
+ 		    fl->cur.isDir = 1;
++	    printf("dh calling processBinaryFile 3\n");
+ 		(void) processBinaryFile(pkg, fl, *fn, 1);
+ 	    }
+ 	}

@@ -1,0 +1,228 @@
+diff --git a/lib/rpmfi.cc b/lib/rpmfi.cc
+index d5d7bde..a11c8e1 100644
+--- a/lib/rpmfi.cc
++++ b/lib/rpmfi.cc
+@@ -29,7 +29,30 @@
+ #include "rpmio_internal.hh"   /* fdInit/FiniDigest */
+ 
+ #include "debug.h"
++#ifdef __MVS__
++mode_t zos_normalize_mode(mode_t raw)
++{
++    mode_t perms = raw & 0x0FFF;     /* keep only permission bits */
++    mode_t ztype = raw & 0xFF000000; /* z/OS type bits */
++
++    mode_t type;
++    switch (ztype) {
++        case 0x01000000: type = S_IFIFO;  break;
++        case 0x02000000: type = S_IFCHR;  break;
++        case 0x03000000: type = S_IFREG;  break;
++        case 0x04000000: type = S_IFDIR;  break;
++        case 0x05000000: type = S_IFBLK;  break;
++        case 0x06000000: type = S_IFLNK;  break;
++        case 0x07000000: type = S_IFSOCK; break;
++        default:         type = S_IFREG;  break; /* assume regular */
++    }
+ 
++    printf("zos_normalize_mode: raw=0x%08x ztype=0x%08x -> type=0x%05o perms=0%04o\n",
++           raw, ztype, type, perms);
++
++    return type | perms;
++}
++#endif
+ using hardlinks = std::vector<int>;
+ using nlinkHash = std::unordered_map<int,std::shared_ptr<hardlinks>>;
+ 
+@@ -509,7 +532,26 @@ rpm_mode_t rpmfilesFMode(rpmfiles fi, int ix)
+     if (fi != NULL && ix >= 0 && ix < rpmfilesFC(fi)) {
+ 	if (fi->fmodes != NULL)
+ 	    fmode = fi->fmodes[ix];
++	printf("dh fmode Value = %" PRIu16 "\n", fmode);
++
++	fmode = zos_normalize_mode(fmode);
++	printf("dh fmode norm Value = %" PRIu16 "\n", fmode);
++
++	 /* If only perms are stored, add regular file type */
++	  if ((fmode & S_IFMT) == 0) {
++		fmode |= S_IFREG;   /* assume regular file by default */
++	printf("dh fmode IFMT Value = %" PRIu16 "\n", fmode);
++				            }
+     }
++    printf("dh1 Value = %" PRIu32 "\n", fmode);
++    printf("dh1 Hex   = 0x%08X\n", fmode);
++    printf("dh1 Octal = 0%o\n", fmode);
++
++
++    printf("dh Value = %" PRIu16 "\n", fmode);
++    printf("dh unsigned Value = %u\n", (unsigned)fmode);
++    printf("dh Hex     = 0x%X\n", (unsigned int)fmode);
++
+     return fmode;
+ }
+ 
+@@ -802,7 +844,8 @@ int rpmfilesStat(rpmfiles fi, int ix, int flags, struct stat *sb)
+ 	int warn = flags & 0x1;
+ 	const char *user = rpmfilesFUser(fi, ix);
+ 	const char *group = rpmfilesFGroup(fi, ix);
+-
++ printf("dh user = %s\n", user);
++ printf("dh group = %s\n", group);
+ 	memset(sb, 0, sizeof(*sb));
+ 	sb->st_nlink = rpmfilesFLinks(fi, ix, NULL);
+ 	sb->st_ino = rpmfilesFInode(fi, ix);
+@@ -812,8 +855,10 @@ int rpmfilesStat(rpmfiles fi, int ix, int flags, struct stat *sb)
+ 
+ 	/* Only regular files and symlinks have a size */
+ 	if (S_ISREG(sb->st_mode) || S_ISLNK(sb->st_mode))
++	{
+ 	    sb->st_size = rpmfilesFSize(fi, ix);
+-
++	}
++#ifndef __MVS__
+ 	if (user && rpmugUid(user, &sb->st_uid)) {
+ 	    if (warn)
+ 		rpmlog(RPMLOG_WARNING,
+@@ -827,9 +872,10 @@ int rpmfilesStat(rpmfiles fi, int ix, int flags, struct stat *sb)
+ 			_("group %s does not exist - using %s\n"), group, GID_0_GROUP);
+ 	    sb->st_mode &= ~S_ISGID;	/* turn off sgid bit */
+ 	}
+-
++#endif
+ 	rc = 0;
+     }
++    printf("dh rc =%d \n", rc);
+     return rc;
+ }
+ 
+@@ -1571,10 +1617,28 @@ static int rpmfilesPopulate(rpmfiles fi, Header h, rpmfiFlags flags)
+     headerGetFlags defFlags = HEADERGET_ALLOC;
+     struct rpmtd_s digalgo, td;
+     rpm_count_t totalfc = rpmfilesFC(fi);
++printf("dh in rpmfilesPopulate\n"); 
++fprintf(stderr, "DEBUG: before _hgfi FILEMODES fi->fmodes=%p\n", (void*)fi->fmodes);
+ 
+     /* XXX TODO: all these should be sanity checked, ugh... */
+-    if (!(flags & RPMFI_NOFILEMODES))
+-	_hgfi(h, RPMTAG_FILEMODES, &td, scareFlags, fi->fmodes);
++    if (!(flags & RPMFI_NOFILEMODES)) {
++        uint16_t *modes16 = NULL;
++        _hgfi(h, RPMTAG_FILEMODES, &td, scareFlags, modes16);
++	if (modes16) {
++	      fi->fmodes = (rpm_mode_t *) xmalloc(totalfc * sizeof(*fi->fmodes));
++	      for (rpm_count_t i = 0; i < totalfc; i++) {
++	          /* mask to 16-bit then promote to full rpm_mode_t to avoid garbage high bits */
++	          fi->fmodes[i] = (rpm_mode_t)(modes16[i] & 0xffff);
++	          /* Optionally restore common S_IF* bits if needed by your environment.
++	        	 *                Do NOT guess type here; keep raw mode bits from header. */
++	          fprintf(stderr, "dh rpmfilesPopulate: modes16[%u]=%o -> fi->fmodes[%u]=%o\n",
++	                    (unsigned)i, modes16[i], (unsigned)i, fi->fmodes[i]);
++	      }
++	 } else {
++	        fprintf(stderr, "dh rpmfilesPopulate: WARNING modes16 == NULL\n");
++	}
++    }
++    
+     if (!(flags & RPMFI_NOFILEFLAGS))
+ 	_hgfi(h, RPMTAG_FILEFLAGS, &td, scareFlags, fi->fflags);
+     if (!(flags & RPMFI_NOFILEVERIFYFLAGS))
+@@ -1671,6 +1735,7 @@ static int rpmfilesPopulate(rpmfiles fi, Header h, rpmfiFlags flags)
+ 
+ rpmfiles rpmfilesNew(rpmstrPool pool, Header h, rpmTagVal tagN, rpmfiFlags flags)
+ {
++	printf("dh rpmfilesNew enter\n");
+     rpmfiles fi = new rpmfiles_s {};
+     int fc;
+ 
+@@ -1714,10 +1779,12 @@ rpmfiles rpmfilesNew(rpmstrPool pool, Header h, rpmTagVal tagN, rpmfiFlags flags
+ 
+     fi->h = (fi->fiflags & RPMFI_KEEPHEADER) ? headerLink(h) : NULL;
+ 
++	printf("dh rpmfilesNew exit1\n");
+     return rpmfilesLink(fi);
+ 
+ err:
+     rpmfilesFree(fi);
++	printf("dh rpmfilesNew exit2\n");
+     return NULL;
+ }
+ 
+@@ -1897,6 +1964,7 @@ const char * rpmfiFN(rpmfi fi)
+ 	if (fi->fn != NULL)
+ 	    fn = fi->fn;
+     }
++    printf("dh rpmfiFN = %s\n", fn);
+     return fn;
+ }
+ 
+@@ -1909,6 +1977,7 @@ const char * rpmfiOFN(rpmfi fi)
+ 	if (fi->ofn != NULL)
+ 	    fn = fi->ofn;
+     }
++    printf("dh rpmfiFN = %s\n", fn);
+     return fn;
+ }
+ 
+@@ -1932,11 +2001,47 @@ uint32_t rpmfiFDepends(rpmfi fi, const uint32_t ** fddictp)
+     return rpmfilesFDepends(fi ? fi->files : NULL,  fi ? fi->i : -1, fddictp);
+ }
+ 
++#ifdef __MVS__
++static mode_t zos_mode_normalize(mode_t zos_mode)
++{
++	    mode_t perms = zos_mode & 07777;
++	        mode_t zos_ftype = zos_mode & S_IFMT;   /* <-- fixed */
++
++		    mode_t posix_ftype;
++		        switch (zos_ftype) {
++				        case 0300000000:   /* z/OS regular file */
++						            posix_ftype = S_IFREG;   /* 0100000 */
++							                break;
++									        case S_IFDIR:
++									        case S_IFLNK:
++									        case S_IFIFO:
++									        case S_IFCHR:
++									        case S_IFBLK:
++									        case S_IFSOCK:
++									            posix_ftype = zos_ftype;
++										                break;
++												        default:
++												            fprintf(stderr, "DEBUG: zos_mode_normalize: unknown ftype %o, defaulting to REG\n", zos_ftype);
++													                posix_ftype = S_IFREG;
++															            break;
++																        }
++
++			    return posix_ftype | perms;
++}
++#endif
++
+ int rpmfiStat(rpmfi fi, int flags, struct stat *sb)
+ {
+     int rc = -1;
+     if (fi != NULL) {
+ 	rc = rpmfilesStat(fi->files, fi->i, flags, sb);
++	fprintf(stderr, "DEBUG: rpmfiStat -> sb.st_mode = %o\n", sb->st_mode);
++#ifdef __MVS__
++	        sb->st_mode = zos_mode_normalize(sb->st_mode);
++		 fprintf(stderr, "DEBUG: rpmfiStat -> sb.st_mode(normalized) = %o\n", sb->st_mode);
++#endif
++
++
+ 	/* In archives, hardlinked files are empty except for the last one */
+ 	if (rc == 0 && fi->archive && sb->st_nlink > 1) {
+ 	    const int *links = NULL;
+@@ -2095,6 +2200,7 @@ static int iterWriteArchiveNextFile(rpmfi fi)
+     if (numHardlinks>1) {
+ 	for (int i=0; i<numHardlinks; i++) {
+ 	    rpmfiSetFX(fi, hardlinks[i]);
++	    printf("dh calling rpmfiArchiveWriteHeader with hardinks \n");
+ 	    int rc = rpmfiArchiveWriteHeader(fi);
+ 	    if (rc) {
+ 		return rc;
+@@ -2102,6 +2208,7 @@ static int iterWriteArchiveNextFile(rpmfi fi)
+ 	}
+ 	rpmfiSetFX(fi, hardlinks[0]);
+     } else {
++	    printf("dh calling rpmfiArchiveWriteHeader\n");
+ 	int rc = rpmfiArchiveWriteHeader(fi);
+ 	if (rc) {
+ 	    return rc;
