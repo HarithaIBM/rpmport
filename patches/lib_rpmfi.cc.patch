@@ -1,5 +1,5 @@
 diff --git a/lib/rpmfi.cc b/lib/rpmfi.cc
-index d5d7bde..68f38f1 100644
+index d5d7bde..e1c3b16 100644
 --- a/lib/rpmfi.cc
 +++ b/lib/rpmfi.cc
 @@ -509,6 +509,15 @@ rpm_mode_t rpmfilesFMode(rpmfiles fi, int ix)
@@ -36,7 +36,7 @@ index d5d7bde..68f38f1 100644
  	rc = 0;
      }
      return rc;
-@@ -1573,8 +1582,22 @@ static int rpmfilesPopulate(rpmfiles fi, Header h, rpmfiFlags flags)
+@@ -1573,8 +1582,18 @@ static int rpmfilesPopulate(rpmfiles fi, Header h, rpmfiFlags flags)
      rpm_count_t totalfc = rpmfilesFC(fi);
  
      /* XXX TODO: all these should be sanity checked, ugh... */
@@ -50,10 +50,6 @@ index d5d7bde..68f38f1 100644
 +             for (rpm_count_t i = 0; i < totalfc; i++) {
 +                 /* mask to 16-bit then promote to full rpm_mode_t to avoid garbage high bits */
 +                 fi->fmodes[i] = (rpm_mode_t)(modes16[i] & 0xffff);
-+                 /* Optionally restore common S_IF* bits if needed by your environment.
-+                        *                Do NOT guess type here; keep raw mode bits from header. */
-+                 fprintf(stderr, "rpmfilesPopulate: modes16[%u]=%o -> fi->fmodes[%u]=%o\n",
-+                           (unsigned)i, modes16[i], (unsigned)i, fi->fmodes[i]);
 +             }
 +       }
 +    }
@@ -61,11 +57,3 @@ index d5d7bde..68f38f1 100644
      if (!(flags & RPMFI_NOFILEFLAGS))
  	_hgfi(h, RPMTAG_FILEFLAGS, &td, scareFlags, fi->fflags);
      if (!(flags & RPMFI_NOFILEVERIFYFLAGS))
-@@ -1937,6 +1960,7 @@ int rpmfiStat(rpmfi fi, int flags, struct stat *sb)
-     int rc = -1;
-     if (fi != NULL) {
- 	rc = rpmfilesStat(fi->files, fi->i, flags, sb);
-+	fprintf(stderr, "DEBUG: rpmfiStat -> sb.st_mode = %o\n", sb->st_mode);
- 	/* In archives, hardlinked files are empty except for the last one */
- 	if (rc == 0 && fi->archive && sb->st_nlink > 1) {
- 	    const int *links = NULL;
