@@ -1,0 +1,52 @@
+diff --git a/lib/headerutil.cc b/lib/headerutil.cc
+index a0e122b..0bcff89 100644
+--- a/lib/headerutil.cc
++++ b/lib/headerutil.cc
+@@ -121,7 +121,28 @@ static int headerPutType(Header h, rpmTagVal tag, rpmTagType reqtype,
+ 	|| size < 1 || data == NULL || h == NULL) {
+ 	valid = 0;
+     }
+-
++    if ((tag == RPMTAG_FILECCSID) || (tag == RPMTAG_FILEMODES) || (tag ==RPMTAG_FILEGENVALUE) || (tag == RPMTAG_FILETXTFLAG)){
++if (type != reqtype) {
++   fprintf(stderr,
++          "DEBUG headerPut FAIL: type mismatch for tag %u: got type=%d expected=%d\n",
++          tag, type, reqtype);
++}
++if (size < 1) {
++    fprintf(stderr,
++           "DEBUG headerPut FAIL: size < 1 for tag %u (size=%zu)\n",
++            tag, size);
++}
++if (data == NULL) {
++   fprintf(stderr,
++        "DEBUG headerPut FAIL: data == NULL for tag %u\n",
++          tag);
++}
++if (h == NULL) {
++   fprintf(stderr,
++          "DEBUG headerPut FAIL: header pointer NULL for tag %u\n",
++           tag);
++}
++    }
+     /*
+      * Non-array types can't be appended to. Binary types use size
+      * for data length, for other non-array types size must be 1.
+@@ -132,7 +153,7 @@ static int headerPutType(Header h, rpmTagVal tag, rpmTagType reqtype,
+ 	    valid = 0;
+ 	}
+     }
+-
++if ((tag == RPMTAG_FILECCSID) || (tag == RPMTAG_FILEMODES) || (tag ==RPMTAG_FILEGENVALUE) || (tag == RPMTAG_FILETXTFLAG))
+     if (valid) {
+ 	rpmtdReset(&td);
+ 	td.tag = tag;
+@@ -142,7 +163,7 @@ static int headerPutType(Header h, rpmTagVal tag, rpmTagType reqtype,
+ 
+ 	valid = headerPut(h, &td, flags);
+     }
+-
++if ((tag == RPMTAG_FILECCSID) || (tag == RPMTAG_FILEMODES) || (tag ==RPMTAG_FILEGENVALUE) || (tag == RPMTAG_FILETXTFLAG))
+     return valid;
+ }
+ 	
