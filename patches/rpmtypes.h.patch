@@ -1,5 +1,5 @@
 diff --git a/include/rpm/rpmtypes.h b/include/rpm/rpmtypes.h
-index e5ac7a3..10e74af 100644
+index e5ac7a3..09f637a 100644
 --- a/include/rpm/rpmtypes.h
 +++ b/include/rpm/rpmtypes.h
 @@ -9,6 +9,7 @@
@@ -19,7 +19,7 @@ index e5ac7a3..10e74af 100644
  typedef uint16_t	rpm_rdev_t;
  typedef uint32_t	rpm_dev_t;
  typedef uint32_t	rpm_ino_t;
-@@ -110,6 +111,83 @@ typedef	enum rpmRC_e {
+@@ -110,6 +111,73 @@ typedef	enum rpmRC_e {
      RPMRC_NOKEY		= 4	/*!< Public key is unavailable. */
  } rpmRC;
  
@@ -85,20 +85,10 @@ index e5ac7a3..10e74af 100644
 +   else if ((inmode & LINUX_S_IFMT) == LINUX_S_IFLNK)  outmode |= ZOS_S_IFLNK;
 +    else if ((inmode & LINUX_S_IFMT) == LINUX_S_IFSOCK) outmode |= ZOS_S_IFSOCK;
 +
-+    fprintf(stderr, "to_zos_mode: inmode=%06o -> outmode=%08o (%s)\n",
-+	(unsigned)inmode,
-+	(unsigned)outmode,
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFDIR) ? "DIR" :
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFREG) ? "REG" :
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFLNK) ? "LNK" :
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFCHR) ? "CHR" :
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFBLK) ? "BLK" :
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFSOCK) ? "SOCK" :
-+	((outmode & ZOS_S_IFMT) == ZOS_S_IFIFO) ? "FIFO" : "OTHER");
 +       return outmode;
 +}
 +
-+#endif /* !ARCHIVE_PLATFORM_H_INCLUDED */
++#endif /* __MVS__ */
 +///
  #ifdef __cplusplus
  }

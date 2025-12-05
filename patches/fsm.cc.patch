@@ -1,5 +1,5 @@
 diff --git a/lib/fsm.cc b/lib/fsm.cc
-index 63580c2..a4db1f9 100644
+index 63580c2..e8a2c01 100644
 --- a/lib/fsm.cc
 +++ b/lib/fsm.cc
 @@ -4,6 +4,10 @@
@@ -262,12 +262,11 @@ index 63580c2..a4db1f9 100644
              }
  
  setmeta:
-@@ -1073,6 +1135,37 @@ setmeta:
+@@ -1073,6 +1135,29 @@ setmeta:
  
  	    if (!rc)
  		rc = fsmCommit(di.dirfd, &fp->fpath, fi, fp->action, fp->suffix);
 +#ifdef __MVS__
-+
 +	    if (!rc && fp->setmeta) {
 +	        /* Apply CCSID/TXTFLAG/GENVALUE on final committed path */
 +		char fullpath[PATH_MAX];
@@ -280,9 +279,6 @@ index 63580c2..a4db1f9 100644
 +			attr.att_filetag.ft_ccsid   = fp->ccsid;
 +			attr.att_filetag.ft_txtflag = fp->txtflag;
 +			int rc2 = __chattr(fullpath, &attr, sizeof(attr));
-+			if (rc2 != 0) {
-+				fprintf(stderr, "DEBUG: __fchattr for ccsid/txtflag failed with rc=%d, errno=%d\n", rc2, errno);
-+			}
 +			/* apply GENVALUE bits */
 +			attrib_t pbits;
 +			memset(&pbits, 0, sizeof(pbits));
@@ -291,16 +287,12 @@ index 63580c2..a4db1f9 100644
 +			if (fp->genvalue & __ST_NO_SHAREAS){  pbits.att_noshareasmask = 1; pbits.att_noshareas = 1; pbits.att_setgen=1;}
 +			if (fp->genvalue & __ST_SHARE_LIB){   pbits.att_sharelibmask = 1; pbits.att_sharelib = 1; pbits.att_setgen=1;	}
 +			int rc3 = __chattr(fullpath, &pbits, sizeof(pbits));
-+			if (rc3 != 0) {
-+				fprintf(stderr, "DEBUG: __fchattr for genvalue failed with rc=%d, errno=%d\n", rc3, errno);
-+			}
-+
 +	    }
 +#endif
  
  	    if (!rc)
  		fp->stage = FILE_COMMIT;
-@@ -1155,7 +1248,7 @@ int rpmPackageFilesRemove(rpmts ts, rpmte te, rpmfiles files,
+@@ -1155,7 +1240,7 @@ int rpmPackageFilesRemove(rpmts ts, rpmte te, rpmfiles files,
          if (fp->action == FA_ERASE) {
  	    int missingok = (rpmfiFFlags(fi) & (RPMFILE_MISSINGOK | RPMFILE_GHOST));
  
